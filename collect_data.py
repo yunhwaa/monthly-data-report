@@ -11,32 +11,40 @@ from PublicDataReader import Kosis
 
 # ── 설정 ──────────────────────────────────────────────
 KOSIS_KEY   = os.environ["KOSIS_API_KEY"]
-GMAIL_USER  = os.environ["GMAIL_USER"]          # 보내는 Gmail 주소
-GMAIL_PASS  = os.environ["GMAIL_APP_PASSWORD"]  # Gmail 앱 비밀번호
+GMAIL_USER  = os.environ["GMAIL_USER"]
+GMAIL_PASS  = os.environ["GMAIL_APP_PASSWORD"]
 TO_EMAIL    = "kyhh9124@naver.com"
 
 NOW         = datetime.now()
 YEAR        = NOW.strftime("%Y")
 PREV_MONTH  = (NOW.replace(day=1) - pd.DateOffset(months=1))
-START_PRD   = PREV_MONTH.strftime("%Y%m")       # 전월 데이터 수집
+START_PRD   = PREV_MONTH.strftime("%Y%m")
 END_PRD     = START_PRD
 REPORT_NAME = f"monthly_report_{NOW.strftime('%Y%m')}.xlsx"
 # ──────────────────────────────────────────────────────
 
 
 def collect_kosis() -> pd.DataFrame:
-    api = Kosis(KOSIS_KEY)
-    df = api.get_data(
-        "통계자료",
-        orgId      = "134",
-        tblId      = "DT_134001_001",
-        itmId      = "ALL",
-        objL1      = "ALL",
-        prdSe      = "M",
-        startPrdDe = START_PRD,
-        endPrdDe   = END_PRD,
-    )
-    return df
+    try:
+        api = Kosis(KOSIS_KEY)
+        df = api.get_data(
+            "통계자료",
+            orgId      = "134",
+            tblId      = "DT_134001_001",
+            itmId      = "ALL",
+            objL1      = "ALL",
+            prdSe      = "M",
+            startPrdDe = START_PRD,
+            endPrdDe   = END_PRD,
+        )
+        if df is None or df.empty:
+            print(f"⚠️  KOSIS 데이터 없음 (기간: {START_PRD}~{END_PRD}) → 빈 시트로 대체")
+            return pd.DataFrame({"안내": [f"{START_PRD} 기간 데이터가 없습니다."]})
+        print(f"✅ KOSIS 데이터 {len(df)}행 수집 완료")
+        return df
+    except Exception as e:
+        print(f"⚠️  KOSIS 수집 오류: {e} → 빈 시트로 대체")
+        return pd.DataFrame({"오류": [str(e)]})
 
 
 def collect_yfinance() -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -46,23 +54,36 @@ def collect_yfinance() -> tuple[pd.DataFrame, pd.DataFrame]:
     dow    = yf.download("^DJI",  start=start, end=end, interval="1mo", progress=False)
     nasdaq = yf.download("^IXIC", start=start, end=end, interval="1mo", progress=False)
 
-    dj_df = dow["Close"].reset_index().rename(columns={"^DJI": "Dow Jones Close"})
-    nq_df = nasdaq["Close"].reset_index().rename(columns={"^IXIC": "NASDAQ Close"})
+    # yfinance 버전에 따라 컬럼 구조가 다를 수 있어서 안전하게 처리
+    if isinstance(dow.columns, pd.MultiIndex):
+        dj_close = dow["Close"].iloc[:, 0]
+        nq_close = nasdaq["Close"].iloc[:, 0]
+    else:
+        dj_close = dow["Close"]
+        nq_close = nasdaq["Close"]
 
+    dj_df = dj_close.reset_index().rename(columns={dj_close.name: "Dow Jones Close", "index": "Date"})
+    nq_df = nq_close.reset_index().rename(columns={nq_close.name: "NASDAQ Close", "index": "Date"})
+
+    # Date 컬럼 포맷 정리
+    for df in [dj_df, nq_df]:
+        if "Date" in df.columns:
+            df["Date"] = pd.to_datetime(df["Date"]).dt.strftime("%Y-%m")
+
+    print(f"✅ Yahoo Finance 데이터 수집 완료 (DJI: {len(dj_df)}행, NASDAQ: {len(nq_df)}행)")
     return dj_df, nq_df
 
 
-def style_sheet(writer: pd.ExcelWriter, sheet_name: str, df: pd.DataFrame):
-    """헤더 굵게 + 열 너비 자동 조정"""
-    ws = writer.sheets[sheet_name]
+def style_sheet(writer: pd.ExcelWriter, sheet_name: str):
     from openpyxl.styles import Font, PatternFill, Alignment
+    ws = writer.sheets[sheet_name]
     header_fill = PatternFill("solid", start_color="1F4E79")
     for cell in ws[1]:
         cell.font      = Font(bold=True, color="FFFFFF", name="Arial", size=10)
         cell.fill      = header_fill
         cell.alignment = Alignment(horizontal="center")
     for col in ws.columns:
-        max_len = max(len(str(c.value)) if c.value else 0 for c in col)
+        max_len = max((len(str(c.value)) if c.value else 0) for c in col)
         ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 40)
 
 
@@ -72,10 +93,10 @@ def save_excel(kosis_df: pd.DataFrame, dj_df: pd.DataFrame, nq_df: pd.DataFrame)
         kosis_df.to_excel(writer, sheet_name="KOSIS_미분양현황", index=False)
         dj_df.to_excel(writer,    sheet_name="DowJones",         index=False)
         nq_df.to_excel(writer,    sheet_name="NASDAQ",           index=False)
-
-        style_sheet(writer, "KOSIS_미분양현황", kosis_df)
-        style_sheet(writer, "DowJones",         dj_df)
-        style_sheet(writer, "NASDAQ",           nq_df)
+        style_sheet(writer, "KOSIS_미분양현황")
+        style_sheet(writer, "DowJones")
+        style_sheet(writer, "NASDAQ")
+    print(f"✅ 엑셀 저장 완료: {REPORT_NAME}")
     return path
 
 
@@ -111,6 +132,8 @@ def send_email(file_path: str):
 
 
 def main():
+    print(f"🗓  수집 기간: {START_PRD}")
+
     print("📊 KOSIS 데이터 수집 중...")
     kosis_df = collect_kosis()
 
