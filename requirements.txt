@@ -1,0 +1,4 @@
+PublicDataReader
+yfinance
+pandas
+openpyxl
